@@ -36,11 +36,12 @@ async def test_tts_service():
                 
                 while asyncio.get_event_loop().time() - start_time < timeout_seconds:
                     try:
-                        frame = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                        frame = await asyncio.wait_for(websocket.recv(), timeout=2.0)
                         if isinstance(frame, bytes):
                             frames.append(frame)
+                            print(f"Received frame {len(frames)}/{len(frame)}")
                     except asyncio.TimeoutError:
-                        break
+                        continue
                 
                 if frames:
                     total_audio = b''.join(frames)
@@ -71,7 +72,7 @@ def save_wav(filename: str, audio_data: bytes, sample_rate: int):
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
         wav_file.setframerate(sample_rate)
-        wav_file.writeframes(audio_data.tobytes())
+        wav_file.writeframes(audio_data)
 
 if __name__ == "__main__":
     print("TTS Service Test")

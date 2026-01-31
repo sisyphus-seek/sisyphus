@@ -188,37 +188,47 @@ class TTSService:
         try:
             async for message in websocket:
                 if isinstance(message, str):
-                    control = json.loads(message)
-                    
-                    if control.get("type") == "text_chunk":
-                        text = control.get("text", "")
-                        text_id = control.get("text_id", 0)
-                        voice = control.get("voice")
-                        language = control.get("language")
-                        speaker = control.get("speaker")
-                        instruct = control.get("instruct")
-                        ref_audio = control.get("ref_audio")
-                        ref_text = control.get("ref_text")
-                        voice_mode = control.get("voice_mode")
-
-                        frames = await self.process_text_chunk(
-                            text,
-                            text_id,
-                            voice,
-                            language,
-                            speaker,
-                            instruct,
-                            ref_audio,
-                            ref_text,
-                            voice_mode,
-                        )
+                    try:
+                        control = json.loads(message)
                         
-                        for frame in frames:
-                            await websocket.send(frame)
+                        if control.get("type") == "text_chunk":
+                            text = control.get("text", "")
+                            text_id = control.get("text_id", 0)
+                            voice = control.get("voice")
+                            language = control.get("language")
+                            speaker = control.get("speaker")
+                            instruct = control.get("instruct")
+                            ref_audio = control.get("ref_audio")
+                            ref_text = control.get("ref_text")
+                            voice_mode = control.get("voice_mode")
                             
-                    elif control.get("type") == "flush":
-                        pass
+                            print(f"Synthesizing text: {text}")
+                            frames = await self.process_text_chunk(
+                                text,
+                                text_id,
+                                voice,
+                                language,
+                                speaker,
+                                instruct,
+                                ref_audio,
+                                ref_text,
+                                voice_mode,
+                            )
+                            
+                            if frames:
+                                print(f"Sending {len(frames)} audio frames for text_id={text_id}")
+                                for i, frame in enumerate(frames):
+                                    await websocket.send(frame)
+                            else:
+                                print(f"No frames generated for text_id={text_id}")
+                    except json.JSONDecodeError as e:
+                        print(f"Invalid JSON message: {e}")
+                    except Exception as e:
+                        print(f"Error processing text_chunk: {e}")
                         
+                elif isinstance(message, bytes):
+                    print(f"Received audio frame control message (should not happen)")
+                    
         except websockets.exceptions.ConnectionClosed:
             print(f"TTS connection closed: {websocket.remote_address}")
         except Exception as e:

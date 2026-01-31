@@ -1,4 +1,5 @@
 
+
 ## 📋 项目上下文文档
 
 以下是完整的上下文信息，您可以在新session中使用这些内容继续工作：
@@ -19,6 +20,15 @@
 - [x] TTS WebSocket服务（tts_service.py）
 - [x] 编排脚本（run_inference.py）
 - [x] 测试脚本（test_asr.py, test_tts.py）
+- [x] CUDA环境搭建（Visual C++ Redistributable + PyTorch 2.4.0+cu124）
+- [x] 模型配置（models.yaml）
+- [x] ASR服务CUDA优化（device检测、FP16、KV cache）
+- [x] TTS服务CUDA优化（device检测、FP16、base/custom模型）
+- [x] 语音管理工具（voice_manager.py）
+- [x] 独立运行脚本（run_asr.py、run_tts.py、start_both.bat）
+- [x] TTS独立环境（venv-tts，transformers 4.57.x + qwen-tts）
+- [x] WebSocket通信修复（超时处理、bytes.tobytes()错误）
+- [x] 音频生成验证（test_diagnose.py、test_tts.py通过）
 
 ### Phase 3: Rust后端组件
 - [x] 依赖配置（tokio, tokio-tungstenite, serde, async-openai, cpal, anyhow）
@@ -46,19 +56,27 @@
 sisyphus/
 ├── .env.example                    # 环境变量模板
 ├── .gitignore
-├── PROJECT_CONTEXT.md             # 本文档（需要手动创建）
-├── README.md                        # 主文档
+├── PROJECT_CURRENT_STATUS.md        # 本文档（工作状态追踪）
+├── README.md                       # 主文档
 ├── docs/
-│   └── MODELS.md                 # 模型文档（待创建）
+│   └── MODELS.md                 # 模型配置文档
 ├── inference/
-│   ├── venv/                      # Python虚拟环境
-│   ├── requirements.txt              # 依赖列表
-│   ├── models.yaml                # 模型配置（待创建）
-│   ├── voices/                    # 语音参考（待创建）
-│   ├── voice_manager.py           # 语音管理（待创建）
-│   ├── asr_service.py              # ASR服务（待CUDA优化）
-│   ├── tts_service.py              # TTS服务（待CUDA优化）
-│   └── run_inference.py           # 编排脚本（待更新）
+│   ├── venv/                      # ASR虚拟环境（transformers 5.x + torch 2.4.0+cu124）
+│   ├── venv-tts/                  # TTS虚拟环境（transformers 4.57.x + qwen-tts）
+│   ├── requirements.txt              # ASR依赖
+│   ├── requirements-tts.txt          # TTS依赖
+│   ├── models.yaml                # 模型配置（ASR: GLM-ASR-Nano-2512, TTS: Qwen3-TTS-12Hz-1.7B Base/CustomVoice）
+│   ├── voices/                    # 语音参考目录
+│   ├── voice_manager.py           # 语音管理工具
+│   ├── asr_service.py             # ASR WebSocket服务（CUDA优化）
+│   ├── tts_service.py             # TTS WebSocket服务（CUDA优化、base/custom支持）
+│   ├── run_asr.py                # ASR独立运行入口
+│   ├── run_tts.py                # TTS独立运行入口
+│   ├── start_both.bat            # 批量启动脚本
+│   ├── test_asr.py              # ASR测试脚本
+│   ├── test_tts.py              # TTS测试脚本（已修复超时问题）
+│   ├── test_diagnose.py         # TTS诊断脚本
+│   └── run_inference.py         # 编排脚本（原始，已被独立脚本替代）
 ├── src-tauri/
 │   ├── Cargo.toml
 │   ├── src/
@@ -90,110 +108,132 @@ sisyphus/
 ## 🚀 继续执行计划
 
 ### 阻塞问题
-**当前状态**：Visual C++ Redistributable需要手动安装，PyTorch无法加载CUDA运行时
+**当前状态**：所有Phase 1-5的基础工作已完成，ASR/TTS服务已正常工作
 
-### 下一步（按顺序）
+### 下一步（按优先级）
 
-#### Step 1: 手动安装Visual C++ Redistributable
-- 下载地址：https://aka.ms/vs/17/release/vc_redist.x64.exe
-- 运行安装程序
-- 重启计算机（如需要）
+#### 优先级 1：前后端集成
+- [ ] Rust后端连接ASR/TTS WebSocket服务
+  - ASR: ws://127.0.0.1:8765
+  - TTS: ws://127.0.0.1:8766
+- [ ] 实现音频流式传输（Rust ↔ Python）
+- [ ] 实现文本流式传输（Rust ↔ Python）
+- [ ] 端到端延迟测试（麦克风输入 → LLM → TTS → 扬声器输出）
 
-#### Step 2: 安装PyTorch 2.4.0 (CUDA 12.6)
-- 命令：`cd inference/venv/Scripts && pip install torch==2.4.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124`
-- 验证：`python -c "import torch; print('CUDA:', torch.cuda.is_available())"`
+#### 优先级 2：Docker化部署
+- [ ] 创建Dockerfile（ASR服务）
+  - 基础镜像：python:3.12-slim
+  - 依赖：requirements.txt
+  - 模型路径：/models/GLM-ASR-Nano-2512
+- [ ] 创建Dockerfile（TTS服务）
+  - 基础镜像：python:3.12-slim
+  - 依赖：requirements-tts.txt
+  - 模型路径：/models/Qwen3-TTS-12Hz-1.7B*
+- [ ] 创建docker-compose.yml
+  - ASR服务（端口8765）
+  - TTS服务（端口8766）
+  - 卷挂载：本地模型目录
 
-#### Step 3: 更新requirements.txt
-- 移除torch版本限制
-- 添加：`pyyaml>=6.0`
+#### 优先级 3：性能优化
+- [ ] 安装flash-attn（提升TTS推理速度）
+- [ ] 测试并验证预期性能提升
+  - ASR: ~200-500ms（当前实测待补充）
+  - TTS: ~100-200ms（当前实测待补充）
+  - 端到端: ~400-700ms（当前实测待补充）
+- [ ] 批量推理优化（batch inference for TTS）
 
-#### Step 4: 创建models.yaml
-- ASR路径：F:\\GitRepository\GLM-ASR-Nano-2512
-- TTS Base路径：F:\\GitRepository\Qwen3-TTS-12Hz-1.7B-Base
-- TTS Custom路径：F:\\GitRepository\Qwen3-TTS-12Hz-1.7B-CustomVoice
-- 设备：auto
-- FP16：true
-- 默认语音：custom_voice
+#### 优先级 4：监控和日志
+- [ ] 实现结构化日志（JSON格式）
+- [ ] 实现性能指标收集（推理时间、GPU利用率、内存占用）
+- [ ] 实现健康检查端点（/health for ASR/TTS）
 
-#### Step 5: 优化ASR服务
-- 加载配置（models.yaml）
-- CUDA设备检测
-- FP16优化（torch.cuda.amp.autocast）
-- KV缓存启用
+#### 优先级 5：错误处理和恢复
+- [ ] 模型加载失败重试机制
+- [ ] WebSocket断线重连策略
+- [ ] GPU内存不足降级策略（从FP16降级到FP32或CPU）
 
-#### Step 6: 优化TTS服务
-- 加载配置
-- 语音切换（base/custom）
-- SpeechTokenizer加载（custom voice）
-- CUDA优化
+---
 
-#### Step 7: 创建voice_manager.py
-- 语音引用管理
-- 克隆/list/删除命令
+## 💡 已知问题和解决方案
 
-#### Step 8: 更新orchestration
-- 配置加载显示
-- CUDA状态输出
-- 内存监控
+### 问题1：Transformers版本冲突
+**症状**：GLM-ASR需要transformers 5.x，Qwen3-TTS需要4.57.x
+**解决方案**：使用独立虚拟环境
+- venv: transformers 5.x（用于ASR）
+- venv-tts: transformers 4.57.x（用于TTS）
+- 长期方案：Docker容器隔离
 
-#### Step 9: 创建.env.example
-- 所有环境变量文档
+### 问题2：LSP类型注解警告
+**症状**：`qwen-tts` API参数类型与实际不符（language/speaker）
+**影响**：不影响运行，仅IDE警告
+**解决方案**：暂时忽略，等待qwen-tts官方更新
 
-#### Step 10: 更新文档
-- CUDA设置说明
-- 模型配置指南
-- 性能基准
+### 问题3：flash-attn未安装
+**症状**：`Warning: flash-attn is not installed`
+**影响**：推理速度变慢，但不影响功能
+**解决方案**：可选安装（需要编译，Windows较复杂）
+```bash
+# 安装命令（如需要）
+pip install flash-attn --no-build-isolation
+```
+
+### 问题4：NumPy版本冲突
+**症状**：NumPy 2.x与torch 2.4.0+cu124 ABI不兼容
+**解决方案**：venv-tts中使用`numpy<2`
+
+---
+
+## 🎯 预期性能提升（待实测验证）
+
+| 组件 | 当前（CPU，未优化） | CUDA 12.6（理论） | 实测（待补充） | 提升倍数 |
+|--------|-------------------|------------------|----------------|----------|
+| ASR推理 | ~3.5s | ~200-500ms | ？ | 6-25x |
+| TTS合成 | ~2.3s | ~100-200ms | ？ | 10-23x |
+| 语音克隆 | N/A | ~300-500ms | ？ | 新功能 |
+| 总流水线 | ~5.8s | ~400-700ms | ？ | 10-15x |
 
 ---
 
 ## 💡 内存管理策略
 
-**确认方案**：启动时加载两个模型（~8GB总内存）
-- ASR：4GB + overhead
-- TTS Custom：3.6GB
-- 剩余：~3.6GB（在11.6GB系统中应该舒适）
+**确认方案**：双环境独立运行，避免依赖冲突
+- ASR环境（venv）：GLM-ASR-Nano-2512（~4GB）
+- TTS环境（venv-tts）：Qwen3-TTS-12Hz-1.7B Base + CustomVoice（~7GB）
+
+**GPU内存分配**（RTX 2080 Ti，22GB VRAM）
+- ASR: ~4GB（加载后）
+- TTS: ~7GB（加载后）
+- 剩余：~11GB（舒适）
 
 **如果内存不足**：
-- 策略A：仅加载ASR，TTS按需加载
-- 策略B：卸载不需要的模型，降低内存占用
-
----
-
-## 🎯 预期性能提升
-
-| 组件 | 当前（CPU） | CUDA 12.6 | 提升 |
-|--------|--------------|-----------|-----|
-| ASR推理 | ~3.5s | ~200-500ms | **6-25x** |
-| TTS合成 | ~2.3s | ~100-200ms | **10-23x** |
-| 语音克隆 | N/A | ~300-500ms | **新功能** |
-| 总流水线 | ~5.8s | ~400-700ms | **10-15x** |
-
----
-
-## 🔍 故障排查
-
-### 问题：PyTorch CUDA DLL加载失败
-**症状**：`ImportError: DLL load failed while importing _C`
-**原因**：缺少Visual C++ Redistributable 2015-2022
-**解决**：安装vc_redist.x64.exe
-
-### 问题：CUDA可用但未使用
-**症状**：torch.cuda.is_available()返回False
-**解决**：1. 验证PyTorch CUDA版本安装；2. 检查NVIDIA驱动
+- 策略A：仅按需加载TTS模型（base vs custom）
+- 策略B：降级到FP32，减少内存占用
+- 策略C：模型量化（INT8，待调研）
 
 ---
 
 ## ✅ 检查清单
 
-在新session中继续前，请确认：
+在继续新工作前，请确认当前状态：
 
-- [ ] Visual C++ Redistributable已安装
-- [ ] PyTorch 2.4.0 CUDA版本已安装
-- [ ] CUDA检测返回True
-- [ ] models.yaml创建完成
-- [ ] ASR服务CUDA优化完成
-- [ ] TTS服务CUDA+语音克隆完成
-- [ ] 所有服务启动正常
+### 服务状态
+- [x] ASR服务正常运行（端口8765，venv环境）
+- [x] TTS服务正常运行（端口8766，venv-tts环境）
+- [x] 模型加载成功（ASR: GLM-ASR-Nano-2512；TTS: Qwen3-TTS-12Hz-1.7B Base/CustomVoice）
+- [x] CUDA环境验证（torch 2.4.0+cu124，CUDA 12.4）
+- [x] 音频生成验证（test_tts.py成功生成3个音频文件）
+
+### 文档状态
+- [x] README.md已更新（CUDA设置、模型配置、性能基准）
+- [x] docs/MODELS.md已创建（models.yaml示例、依赖说明、双环境运行说明）
+- [x] .env.example已创建（环境变量模板）
+
+### 测试状态
+- [x] ASR WebSocket连接测试（test_asr.py连接成功）
+- [x] TTS WebSocket连接测试（test_tts.py连接成功）
+- [x] 音频生成测试（test_diagnose.py成功生成0.62秒"test"语音）
+- [ ] 端到端延迟测试（待前后端集成后进行）
+- [ ] 批量推理性能测试（待flash-attn安装后进行）
 
 ---
 
@@ -201,7 +241,66 @@ sisyphus/
 
 在新session中，请告诉AI：
 
-**"读取F:\GitRepository\sisyphus\PROJECT_CONTEXT.md，然后继续执行Step 1"**
+**"读取F:\GitRepository\sisyphus\PROJECT_CURRENT_STATUS.md，然后继续工作"**
 
-这样AI就能获得完整的项目上下文并继续CUDA实现工作！
+这样AI就能获得完整的项目上下文并继续前后端集成工作！
+
+---
+
+## 📊 工作日志摘要
+
+### 2025-02-01（今日）
+1. **CUDA环境搭建**
+   - 安装Visual C++ Redistributable
+   - 安装PyTorch 2.4.0+cu124（CUDA 12.4）
+   - 验证CUDA可用性
+
+2. **模型配置和优化**
+   - 创建inference/models.yaml
+   - 更新asr_service.py（CUDA检测、FP16、KV cache、config加载）
+   - 更新tts_service.py（双模型支持、语音切换、CUDA优化）
+
+3. **独立运行脚本创建**
+   - 创建run_asr.py（ASR独立入口）
+   - 创建run_tts.py（TTS独立入口）
+   - 创建start_both.bat（批量启动）
+
+4. **TTS独立环境搭建**
+   - 创建venv-tts（transformers 4.57.x + qwen-tts）
+   - 解决NumPy版本冲突（numpy<2）
+   - 解决onnxruntime DLL问题（降级到CPU版本）
+
+5. **WebSocket通信问题诊断和修复**
+   - 问题：原始test_tts.py超时太短（1.0s），音频接收不完整
+   - 诊断：创建test_diagnose.py，确认通信正常（3.4s接收87帧，0.62秒"test"语音）
+   - 修复：增加超时到2.0s，修改超时行为为continue（不break）
+   - 修复：删除bytes.tobytes()调用（audio_data已是bytes类型）
+
+6. **文档更新**
+   - 更新README.md（CUDA设置、模型依赖、性能基准）
+   - 创建docs/MODELS.md（models.yaml示例、双环境运行说明）
+   - 创建.env.example
+
+7. **验证结果**
+   - ASR服务：正常启动，模型加载成功
+   - TTS服务：正常启动，双模型加载成功
+   - 音频测试：成功生成3个测试音频文件
+
+---
+
+## 🔄 待解决的问题
+
+### 技术债务
+- [ ] flash-attn安装（可选，提升性能）
+- [ ] LSP类型注解清理（qwen-tts兼容性）
+- [ ] 模型加载失败重试机制
+- [ ] WebSocket断线重连策略
+
+### 架构改进
+- [ ] 统一日志格式（JSON结构化）
+- [ ] 健康检查端点
+- [ ] 性能指标收集
+- [ ] Docker化部署
+
+---
 
