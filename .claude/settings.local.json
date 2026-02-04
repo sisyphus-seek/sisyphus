@@ -4,7 +4,10 @@
       "Bash(./venv/Scripts/python.exe:*)",
       "Bash(./venv/Scripts/pip.exe show:*)",
       "Bash(cargo check:*)",
-      "Bash(cargo fmt:*)"
+      "Bash(cargo fmt:*)",
+      "Bash(cmd /c \"cd /d f:\\\\GitRepository\\\\sisyphus\\\\src-tauri && cargo check\")",
+      "Bash(powershell -Command \"cd 'f:\\\\GitRepository\\\\sisyphus\\\\src-tauri'; cargo check 2>&1\":*)",
+      "Bash(powershell -Command \"cd ''f:\\\\GitRepository\\\\sisyphus\\\\src-tauri''; cargo check 2>&1 | Select-Object -Last 20\")"
     ]
   }
 }

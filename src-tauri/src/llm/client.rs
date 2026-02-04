@@ -79,7 +79,7 @@ impl LlmClient {
             .model(&self.model)
             .messages(messages)
             .temperature(0.7)
-            .max_tokens(200_u16)
+            .max_tokens(1024_u16)
             .build()?;
 
         let mut stream = self.client.chat().create_stream(request).await?;
@@ -187,8 +187,8 @@ pub async fn send_llm_request(
 
 /// Stream LLM response with TTS integration
 /// This function:
-/// 1. Streams LLM response chunks
-/// 2. Sends each chunk to TTS for synthesis
+/// 1. Streams LLM response chunks in real-time
+/// 2. Sends each chunk to TTS for synthesis immediately
 /// 3. Queues received audio for playback
 #[tauri::command]
 pub async fn stream_llm_response(
@@ -238,91 +238,162 @@ pub async fn stream_llm_response(
         serde_json::json!({ "state": "Thinking" }),
     );
 
-    let temp_client = LlmClient { client, model };
-    match temp_client.stream_completion(messages).await {
-        Ok((full_response, chunks)) => {
-            // Emit state change to Speaking
-            let _ = app.emit(
-                "voice_assistant:state_changed",
-                serde_json::json!({ "state": "Speaking" }),
-            );
+    // Build LLM request
+    let request = CreateChatCompletionRequestArgs::default()
+        .model(&model)
+        .messages(messages)
+        .temperature(0.7)
+        .max_tokens(1024_u16)
+        .build()
+        .map_err(|e| format!("Failed to build request: {}", e))?;
 
-            let app_clone = app.clone();
-            let mut text_id = 0;
+    let mut llm_stream = client
+        .chat()
+        .create_stream(request)
+        .await
+        .map_err(|e| format!("Failed to create LLM stream: {}", e))?;
 
-            // Process each chunk: emit to frontend and send to TTS
-            for chunk in &chunks {
-                // Emit chunk to frontend
-                app_clone
-                    .emit("voice_assistant:assistant_response", chunk)
-                    .map_err(|e| format!("Failed to emit chunk event: {}", e))?;
+    let mut full_response = String::new();
+    let mut current_chunk = String::new();
+    let mut token_count = 0;
+    let mut text_id = 0;
+    let mut last_emit_time = std::time::Instant::now();
+    let mut first_chunk = true;
 
-                // Send text to TTS
-                let tts_request = TtsRequest {
-                    request_type: "text_chunk".to_string(),
-                    text: chunk.content.clone(),
-                    text_id,
-                };
-
-                let json = serde_json::to_string(&tts_request)
-                    .map_err(|e| format!("Failed to serialize TTS request: {}", e))?;
-
-                if let Err(e) = ws_stream.send(WsMessage::Text(json)).await {
-                    eprintln!("Failed to send text to TTS: {}", e);
-                }
-
-                text_id += 1;
-            }
-
-            // Send end signal to TTS
-            let end_request = serde_json::json!({ "type": "end" });
-            let _ = ws_stream
-                .send(WsMessage::Text(end_request.to_string()))
-                .await;
-
-            // Receive audio from TTS and queue for playback
-            while let Some(msg_result) = ws_stream.next().await {
-                match msg_result {
-                    Ok(WsMessage::Binary(audio_data)) => {
-                        // Queue audio for playback
-                        if let Err(e) = queue_playback_audio(audio_data) {
-                            eprintln!("Failed to queue audio: {}", e);
+    // Process LLM stream in real-time
+    while let Some(result) = llm_stream.next().await {
+        match result {
+            Ok(response) => {
+                if let Some(choice) = response.choices.first() {
+                    if let Some(content) = &choice.delta.content {
+                        // On first content, switch to Speaking state
+                        if first_chunk {
+                            first_chunk = false;
+                            let _ = app.emit(
+                                "voice_assistant:state_changed",
+                                serde_json::json!({ "state": "Speaking" }),
+                            );
                         }
-                    }
-                    Ok(WsMessage::Text(text)) => {
-                        // TTS might send status messages
-                        if let Ok(status) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if status.get("type").and_then(|v| v.as_str()) == Some("complete") {
-                                break;
+
+                        full_response.push_str(content);
+                        current_chunk.push_str(content);
+                        token_count += content.split_whitespace().count().max(1);
+
+                        let has_punctuation = content.contains('.')
+                            || content.contains(',')
+                            || content.contains('!')
+                            || content.contains('?')
+                            || content.contains('。')
+                            || content.contains('，')
+                            || content.contains('！')
+                            || content.contains('？');
+
+                        let elapsed_ms = last_emit_time.elapsed().as_millis() as u64;
+
+                        // Emit chunk when: enough tokens, or punctuation, or time elapsed
+                        let should_emit = token_count >= MIN_CHUNK_TOKENS
+                            || (token_count >= 5 && has_punctuation)
+                            || elapsed_ms >= 300;
+
+                        if should_emit && !current_chunk.is_empty() {
+                            let chunk = LlmChunk {
+                                content: current_chunk.clone(),
+                                is_complete: false,
+                            };
+
+                            // Emit to frontend immediately
+                            let _ = app.emit("voice_assistant:assistant_response", &chunk);
+
+                            // Send to TTS
+                            let tts_request = TtsRequest {
+                                request_type: "text_chunk".to_string(),
+                                text: current_chunk.clone(),
+                                text_id,
+                            };
+
+                            if let Ok(json) = serde_json::to_string(&tts_request) {
+                                let _ = ws_stream.send(WsMessage::Text(json)).await;
                             }
+
+                            text_id += 1;
+                            current_chunk.clear();
+                            token_count = 0;
+                            last_emit_time = std::time::Instant::now();
                         }
                     }
-                    Ok(WsMessage::Close(_)) => {
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("TTS WebSocket error: {}", e);
-                        break;
-                    }
-                    _ => {}
                 }
             }
-
-            // Close TTS connection
-            let _ = ws_stream.close(None).await;
-
-            // Emit final complete event
-            app.emit(
-                "voice_assistant:assistant_response",
-                LlmChunk {
-                    content: full_response.clone(),
-                    is_complete: true,
-                },
-            )
-            .map_err(|e| format!("Failed to emit complete event: {}", e))?;
-
-            Ok(())
+            Err(e) => {
+                eprintln!("LLM stream error: {}", e);
+                break;
+            }
         }
-        Err(e) => Err(format!("LLM stream failed: {}", e)),
     }
+
+    // Send remaining chunk
+    if !current_chunk.is_empty() {
+        let chunk = LlmChunk {
+            content: current_chunk.clone(),
+            is_complete: false,
+        };
+        let _ = app.emit("voice_assistant:assistant_response", &chunk);
+
+        let tts_request = TtsRequest {
+            request_type: "text_chunk".to_string(),
+            text: current_chunk,
+            text_id,
+        };
+
+        if let Ok(json) = serde_json::to_string(&tts_request) {
+            let _ = ws_stream.send(WsMessage::Text(json)).await;
+        }
+    }
+
+    // Send end signal to TTS
+    let end_request = serde_json::json!({ "type": "end" });
+    let _ = ws_stream
+        .send(WsMessage::Text(end_request.to_string()))
+        .await;
+
+    // Receive audio from TTS and queue for playback
+    while let Some(msg_result) = ws_stream.next().await {
+        match msg_result {
+            Ok(WsMessage::Binary(audio_data)) => {
+                // Queue audio for playback
+                if let Err(e) = queue_playback_audio(audio_data) {
+                    eprintln!("Failed to queue audio: {}", e);
+                }
+            }
+            Ok(WsMessage::Text(text)) => {
+                // TTS might send status messages
+                if let Ok(status) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if status.get("type").and_then(|v| v.as_str()) == Some("complete") {
+                        break;
+                    }
+                }
+            }
+            Ok(WsMessage::Close(_)) => {
+                break;
+            }
+            Err(e) => {
+                eprintln!("TTS WebSocket error: {}", e);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // Close TTS connection
+    let _ = ws_stream.close(None).await;
+
+    // Emit final complete event (empty content, just signal completion)
+    let _ = app.emit(
+        "voice_assistant:assistant_response",
+        LlmChunk {
+            content: String::new(),
+            is_complete: true,
+        },
+    );
+
+    Ok(())
 }

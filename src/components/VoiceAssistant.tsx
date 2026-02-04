@@ -40,6 +40,7 @@ const useConversation = create<ConversationState>((set, get) => ({
   appendAssistantResponse: (chunk, isComplete) => {
     if (isComplete) {
       const pending = get().pendingAssistantResponse + chunk;
+      console.log('Assistant response complete, moving to conversation:', pending.substring(0, 100));
       if (pending.trim()) {
         set((state) => ({
           conversation: [...state.conversation, { role: 'assistant', content: pending.trim() }],
@@ -116,9 +117,10 @@ export function VoiceAssistant() {
         'voice_assistant:user_transcript',
         (event) => {
           const { partial, final } = event.payload;
+          // Only update transcript display, don't add message here
+          // Message will be added when user stops recording
           if (final) {
             setTranscript(final);
-            addMessage({ role: 'user', content: final });
           } else if (partial) {
             setTranscript(partial);
           }
@@ -130,6 +132,7 @@ export function VoiceAssistant() {
         'voice_assistant:assistant_response',
         (event) => {
           const { content, is_complete } = event.payload;
+          console.log('Assistant response event:', { content: content.substring(0, 50), is_complete });
           appendAssistantResponse(content, is_complete);
         }
       );
@@ -160,22 +163,56 @@ export function VoiceAssistant() {
   }, [setStatus, setTranscript, setAudioLevel, appendAssistantResponse, addMessage]);
 
   const handleStartRecording = useCallback(async () => {
+    console.log('Start recording button clicked');
     try {
       reset();
-      await invoke('start_recording');
+      console.log('Invoking start_recording...');
+      const result = await invoke('start_recording');
+      console.log('start_recording result:', result);
     } catch (error) {
       console.error('Failed to start recording:', error);
+      alert(`Recording failed: ${error}`);
     }
   }, [reset]);
 
   const handleStopRecording = useCallback(async () => {
+    // Only process if we're in Listening state
+    const currentStatus = useConversation.getState().status;
+    if (currentStatus !== 'Listening') {
+      console.log('Ignoring stop - not in Listening state:', currentStatus);
+      return;
+    }
+
     try {
       await invoke('stop_recording');
-      setStatus('Idle');
+
+      // Get the current transcript and send to LLM
+      const currentTranscript = useConversation.getState().transcript;
+      if (currentTranscript.trim()) {
+        // Add user message
+        addMessage({ role: 'user', content: currentTranscript.trim() });
+
+        // Clear transcript immediately to prevent duplicate submissions
+        setTranscript('');
+
+        console.log('Sending to LLM:', currentTranscript);
+        setStatus('Thinking');
+
+        // Call LLM with the transcript
+        try {
+          await invoke('stream_llm_response', { userMessage: currentTranscript.trim() });
+        } catch (llmError) {
+          console.error('LLM error:', llmError);
+          setStatus('Idle');
+        }
+      } else {
+        setStatus('Idle');
+      }
     } catch (error) {
       console.error('Failed to stop recording:', error);
+      setStatus('Idle');
     }
-  }, [setStatus]);
+  }, [setStatus, addMessage, setTranscript]);
 
   const handleSubmitTranscript = useCallback(() => {
     if (transcript.trim()) {
@@ -187,7 +224,8 @@ export function VoiceAssistant() {
   if (!mounted) return null;
 
   const isRecordingDisabled = status === 'Listening' || status === 'Thinking' || status === 'Speaking';
-  const isStopDisabled = status === 'Idle';
+  // Only allow Stop during Listening to prevent duplicate submissions
+  const isStopDisabled = status !== 'Listening';
 
   return (
     <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>

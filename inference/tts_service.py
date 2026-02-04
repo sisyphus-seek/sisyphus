@@ -21,9 +21,9 @@ class TTSService:
         self.attn_implementation = None
         self.base_model_path = "Qwen/Qwen-Audio-TTS"
         self.custom_model_path = "Qwen/Qwen-Audio-TTS"
-        self.sample_rate = 16000
-        self.target_sample_rate = 16000
-        self.frame_size = 640
+        self.sample_rate = 24000  # TTS model native sample rate
+        self.target_sample_rate = 16000  # Target for Rust playback
+        self.frame_size = 640  # 640 bytes = 320 samples @ 16kHz = 20ms
 
     def load_config(self) -> None:
         config_path = os.path.join(os.path.dirname(__file__), "models.yaml")
@@ -142,14 +142,26 @@ class TTSService:
                 audio_waveform = wavs[0]
                 output_sample_rate = sr
             
+            print(f"TTS model output sample rate: {output_sample_rate}Hz, target: {self.target_sample_rate}Hz")
+            print(f"Audio waveform shape before resample: {audio_waveform.shape}, min: {audio_waveform.min():.4f}, max: {audio_waveform.max():.4f}")
+
+            # Always resample to target rate for consistency
             if output_sample_rate != self.target_sample_rate:
                 import librosa
+                print(f"Resampling from {output_sample_rate}Hz to {self.target_sample_rate}Hz")
                 audio_waveform = librosa.resample(
                     audio_waveform,
                     orig_sr=output_sample_rate,
                     target_sr=self.target_sample_rate
                 )
-            
+                print(f"Audio waveform shape after resample: {audio_waveform.shape}")
+
+            # Normalize audio to prevent clipping
+            max_val = np.abs(audio_waveform).max()
+            if max_val > 1.0:
+                print(f"Normalizing audio (max was {max_val})")
+                audio_waveform = audio_waveform / max_val * 0.95
+
             return audio_waveform
         except Exception as e:
             print(f"TTS synthesis error: {e}")
@@ -170,16 +182,24 @@ class TTSService:
         audio_waveform = await self.synthesize(
             text, voice, language, speaker, instruct, ref_audio, ref_text, voice_mode
         )
-        
+
+        # Debug: show audio stats
+        duration_sec = len(audio_waveform) / self.target_sample_rate
+        print(f"Audio duration: {duration_sec:.2f}s ({len(audio_waveform)} samples @ {self.target_sample_rate}Hz)")
+
         audio_pcm16 = self.float32_to_pcm16(audio_waveform)
-        
+
+        # Debug: show first few PCM16 samples
+        first_samples = np.frombuffer(audio_pcm16[:20], dtype=np.int16)
+        print(f"First PCM16 samples: {first_samples}")
+
         frames = []
         for i in range(0, len(audio_pcm16), self.frame_size):
             frame = audio_pcm16[i:i+self.frame_size]
             if len(frame) < self.frame_size:
                 frame += b'\x00' * (self.frame_size - len(frame))
             frames.append(frame)
-        
+
         return frames
     
     async def handle_connection(self, websocket):

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, StreamConfig};
+use cpal::{Device, SampleRate, SupportedStreamConfigRange};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -8,8 +8,7 @@ use tauri::Emitter;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const SAMPLE_RATE: u32 = 16000;
-const CHANNELS: u16 = 1;
+const TARGET_SAMPLE_RATE: u32 = 16000;
 const ASR_HOST: &str = "ws://127.0.0.1:8765";
 const AUDIO_FRAME_SIZE: usize = 640; // 20ms at 16kHz mono = 320 samples * 2 bytes
 
@@ -40,6 +39,12 @@ fn get_audio_tx() -> &'static Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>
 
 pub struct AudioCapture;
 
+/// Audio configuration for capture
+struct CaptureConfig {
+    sample_rate: u32,
+    channels: u16,
+}
+
 impl AudioCapture {
     fn get_default_input_device() -> Result<Device> {
         let host = cpal::default_host();
@@ -49,6 +54,67 @@ impl AudioCapture {
             .ok_or_else(|| anyhow::anyhow!("No default input device found"))?;
 
         Ok(default_device)
+    }
+
+    /// Find the best supported configuration for the device
+    fn get_supported_config(device: &Device) -> Result<CaptureConfig> {
+        let supported_configs: Vec<SupportedStreamConfigRange> = device
+            .supported_input_configs()
+            .map_err(|e| anyhow::anyhow!("Failed to get supported configs: {}", e))?
+            .collect();
+
+        if supported_configs.is_empty() {
+            return Err(anyhow::anyhow!("No supported input configurations"));
+        }
+
+        // Try to find a config that supports our target sample rate
+        // Prefer mono, but accept stereo if needed
+        let target_rate = SampleRate(TARGET_SAMPLE_RATE);
+
+        // First, try to find exact match with mono
+        for config in &supported_configs {
+            if config.channels() == 1
+                && config.min_sample_rate() <= target_rate
+                && config.max_sample_rate() >= target_rate
+            {
+                return Ok(CaptureConfig {
+                    sample_rate: TARGET_SAMPLE_RATE,
+                    channels: 1,
+                });
+            }
+        }
+
+        // Try stereo with target sample rate
+        for config in &supported_configs {
+            if config.channels() == 2
+                && config.min_sample_rate() <= target_rate
+                && config.max_sample_rate() >= target_rate
+            {
+                return Ok(CaptureConfig {
+                    sample_rate: TARGET_SAMPLE_RATE,
+                    channels: 2,
+                });
+            }
+        }
+
+        // Fall back to any supported config (prefer lower sample rates and mono)
+        let best_config = supported_configs
+            .iter()
+            .min_by_key(|c| (c.channels(), c.min_sample_rate().0))
+            .unwrap();
+
+        let sample_rate = if best_config.min_sample_rate().0 <= 48000 && best_config.max_sample_rate().0 >= 48000 {
+            48000
+        } else if best_config.min_sample_rate().0 <= 44100 && best_config.max_sample_rate().0 >= 44100 {
+            44100
+        } else {
+            best_config.min_sample_rate().0
+        };
+
+        Ok(CaptureConfig {
+            sample_rate,
+            channels: best_config.channels(),
+        })
     }
 
     fn calculate_audio_level(samples: &[f32]) -> f32 {
@@ -63,6 +129,53 @@ impl AudioCapture {
     pub fn is_recording() -> bool {
         RECORDING.load(Ordering::SeqCst)
     }
+}
+
+/// Simple linear resampling from source rate to target rate (16kHz)
+fn resample_to_16k(samples: &[f32], source_rate: u32, channels: u16) -> Vec<f32> {
+    // First, convert stereo to mono if needed
+    let mono_samples: Vec<f32> = if channels == 2 {
+        samples
+            .chunks(2)
+            .map(|chunk| {
+                if chunk.len() == 2 {
+                    (chunk[0] + chunk[1]) / 2.0
+                } else {
+                    chunk[0]
+                }
+            })
+            .collect()
+    } else {
+        samples.to_vec()
+    };
+
+    // If already at target rate, return as-is
+    if source_rate == TARGET_SAMPLE_RATE {
+        return mono_samples;
+    }
+
+    // Linear interpolation resampling
+    let ratio = source_rate as f64 / TARGET_SAMPLE_RATE as f64;
+    let output_len = (mono_samples.len() as f64 / ratio).ceil() as usize;
+    let mut output = Vec::with_capacity(output_len);
+
+    for i in 0..output_len {
+        let src_idx = i as f64 * ratio;
+        let src_idx_floor = src_idx.floor() as usize;
+        let frac = (src_idx - src_idx_floor as f64) as f32;
+
+        let sample = if src_idx_floor + 1 < mono_samples.len() {
+            mono_samples[src_idx_floor] * (1.0 - frac) + mono_samples[src_idx_floor + 1] * frac
+        } else if src_idx_floor < mono_samples.len() {
+            mono_samples[src_idx_floor]
+        } else {
+            0.0
+        };
+
+        output.push(sample);
+    }
+
+    output
 }
 
 async fn run_asr_session(
@@ -176,11 +289,23 @@ pub fn start_recording(app: tauri::AppHandle) -> Result<(), String> {
     let device =
         AudioCapture::get_default_input_device().map_err(|e| format!("Device error: {}", e))?;
 
-    let config = StreamConfig {
-        channels: CHANNELS,
-        sample_rate: cpal::SampleRate(SAMPLE_RATE),
+    // Get supported configuration
+    let capture_config = AudioCapture::get_supported_config(&device)
+        .map_err(|e| format!("Config error: {}", e))?;
+
+    println!(
+        "Audio capture config: {}Hz, {} channels",
+        capture_config.sample_rate, capture_config.channels
+    );
+
+    let config = cpal::StreamConfig {
+        channels: capture_config.channels,
+        sample_rate: cpal::SampleRate(capture_config.sample_rate),
         buffer_size: cpal::BufferSize::Default,
     };
+
+    let source_rate = capture_config.sample_rate;
+    let source_channels = capture_config.channels;
 
     // Create channel for audio data
     let (audio_tx, audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -214,8 +339,11 @@ pub fn start_recording(app: tauri::AppHandle) -> Result<(), String> {
                     AudioLevel { level: audio_level },
                 );
 
+                // Resample to 16kHz mono if needed
+                let resampled = resample_to_16k(data, source_rate, source_channels);
+
                 // Convert f32 samples to i16 PCM bytes and send to ASR
-                let pcm_bytes: Vec<u8> = data
+                let pcm_bytes: Vec<u8> = resampled
                     .iter()
                     .flat_map(|&sample| {
                         let clamped = sample.max(-1.0).min(1.0);
