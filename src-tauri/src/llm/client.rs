@@ -6,7 +6,7 @@ use async_openai::{
 };
 use futures::StreamExt;
 use futures_util::SinkExt;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::env;
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
@@ -17,11 +17,6 @@ use crate::conversation::{ConversationState, Message, Role};
 
 const MIN_CHUNK_TOKENS: usize = 20;
 const TTS_HOST: &str = "ws://127.0.0.1:8766";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmToken {
-    pub text: String,
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmChunk {

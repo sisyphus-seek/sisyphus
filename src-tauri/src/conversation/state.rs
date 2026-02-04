@@ -88,6 +88,7 @@ impl ConversationState {
         self.next_turn_id += 1;
     }
 
+    #[allow(dead_code)]
     pub fn get_current_turn(&self) -> &Turn {
         &self.current_turn
     }
@@ -100,14 +101,17 @@ impl ConversationState {
         self.current_turn.status
     }
 
+    #[allow(dead_code)]
     pub fn set_asr_segment_id(&mut self, id: usize) {
         self.current_turn.asr_segment_id = Some(id);
     }
 
+    #[allow(dead_code)]
     pub fn set_llm_request_id(&mut self, id: String) {
         self.current_turn.llm_request_id = Some(id);
     }
 
+    #[allow(dead_code)]
     pub fn set_tts_stream_id(&mut self, id: usize) {
         self.current_turn.tts_stream_id = Some(id);
     }
@@ -133,6 +137,7 @@ impl ConversationState {
         self.set_turn_status(ConversationStatus::Speaking);
     }
 
+    #[allow(dead_code)]
     pub fn can_interrupt(&self) -> bool {
         matches!(
             self.current_turn.status,
