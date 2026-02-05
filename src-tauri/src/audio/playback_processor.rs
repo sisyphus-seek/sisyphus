@@ -6,12 +6,14 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+#[allow(dead_code)]
 pub struct PlaybackProcessor {
     audio_tx: Option<mpsc::Sender<Vec<f32>>>,
     stop_tx: Option<mpsc::Sender<()>>,
     resampler: Option<Arc<Mutex<Resampler>>>,
 }
 
+#[allow(dead_code)]
 impl PlaybackProcessor {
     pub fn new() -> Self {
         Self {

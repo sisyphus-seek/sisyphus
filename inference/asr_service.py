@@ -81,8 +81,14 @@ class ASRService:
                 self.model.generation_config.use_cache = self.use_kv_cache
             if hasattr(self.model, "generation_config"):
                 generation_config = self.model.generation_config
+                # Ensure pad_token_id is a single integer
+                if isinstance(getattr(generation_config, "pad_token_id", None), (list, tuple)):
+                    generation_config.pad_token_id = generation_config.pad_token_id[0]
+                
                 if getattr(generation_config, "pad_token_id", None) is None:
                     eos_token_id = getattr(generation_config, "eos_token_id", None)
+                    if isinstance(eos_token_id, (list, tuple)):
+                        eos_token_id = eos_token_id[0]
                     if eos_token_id is not None:
                         generation_config.pad_token_id = eos_token_id
 
@@ -116,13 +122,23 @@ class ASRService:
             inputs = self.processor.apply_transcription_request(audio_array)
             inputs = inputs.to(self.model.device, dtype=self.model.dtype)
 
+            pad_id = getattr(self.model.generation_config, "pad_token_id", None)
+            if isinstance(pad_id, (list, tuple)):
+                pad_id = pad_id[0]
+            
+            # Explicitly force EOS as PAD if still list or None to avoid comparison errors in transformers
+            if pad_id is None or isinstance(pad_id, (list, tuple)):
+                pad_id = getattr(self.model.generation_config, "eos_token_id", 0)
+                if isinstance(pad_id, (list, tuple)):
+                    pad_id = pad_id[0]
+
             with torch.inference_mode():
                 predicted_ids = self.model.generate(
                     **inputs,
                     use_cache=self.use_kv_cache,
                     do_sample=False,
                     max_new_tokens=500,
-                    pad_token_id=getattr(self.model.generation_config, "pad_token_id", None),
+                    pad_token_id=pad_id,
                 )
 
             decoded = self.processor.batch_decode(

@@ -1,15 +1,14 @@
 use anyhow::Result;
-use rubato::{
-    FftFixedIn, Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters,
-    SincInterpolationType, WindowFunction,
-};
+use rubato::{FftFixedIn, Resampler as RubatoResampler};
 
+#[allow(dead_code)]
 pub struct Resampler {
     resampler: FftFixedIn<f32>,
     input_buffer: Vec<Vec<f32>>,
     output_buffer: Vec<Vec<f32>>,
 }
 
+#[allow(dead_code)]
 impl Resampler {
     pub fn new(
         source_rate: u32,

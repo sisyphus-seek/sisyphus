@@ -3,15 +3,16 @@ use crate::audio::resampler::Resampler;
 use anyhow::Result;
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 // Wrapper to make CaptureProcessor Send/Sync by moving the !Send stream out
+#[allow(dead_code)]
 pub struct CaptureProcessor {
     stream_handle: Option<mpsc::Sender<()>>, // Sending to this triggers stop
     tx: mpsc::Sender<Frame>,
 }
 
+#[allow(dead_code)]
 impl CaptureProcessor {
     pub fn new(tx: mpsc::Sender<Frame>) -> Self {
         Self {

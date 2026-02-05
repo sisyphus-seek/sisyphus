@@ -1,15 +1,16 @@
 use crate::pipeline::frames::Frame;
 use crate::pipeline::processor::Processor;
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+#[allow(dead_code)]
 pub struct Pipeline {
     processors: Vec<Box<dyn Processor>>,
     tx: mpsc::Sender<Frame>,
     rx: mpsc::Receiver<Frame>,
 }
 
+#[allow(dead_code)]
 impl Pipeline {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(100);
