@@ -5,7 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const TARGET_SAMPLE_RATE: u32 = 16000;
@@ -32,14 +32,9 @@ pub struct AsrTranscript {
 
 static RECORDING: AtomicBool = AtomicBool::new(false);
 static AUDIO_TX: OnceLock<Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>> = OnceLock::new();
-static DONE_TX: OnceLock<Arc<Mutex<Option<oneshot::Sender<()>>>>> = OnceLock::new();
 
 fn get_audio_tx() -> &'static Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>> {
     AUDIO_TX.get_or_init(|| Arc::new(Mutex::new(None)))
-}
-
-fn get_done_tx() -> &'static Arc<Mutex<Option<oneshot::Sender<()>>>> {
-    DONE_TX.get_or_init(|| Arc::new(Mutex::new(None)))
 }
 
 pub struct AudioCapture;
@@ -187,7 +182,6 @@ async fn run_asr_session(
     app: tauri::AppHandle,
     mut audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
-    println!("Starting ASR session loop...");
     // Connect to ASR WebSocket
     let ws_result = connect_async(ASR_HOST).await;
 
@@ -199,21 +193,19 @@ async fn run_asr_session(
                 "voice_assistant:error",
                 serde_json::json!({ "code": "ASR_CONNECTION_FAILED", "message": format!("{}", e) }),
             );
-            // Signal done even on failure
-            if let Some(tx) = get_done_tx().lock().unwrap().take() {
-                let _ = tx.send(());
-            }
             return;
         }
     };
 
     let mut audio_buffer = Vec::with_capacity(AUDIO_FRAME_SIZE);
+    let mut last_partial = String::new();
+    let mut closing = false;
 
     loop {
         tokio::select! {
             // Receive audio from capture and send to ASR
-            res = audio_rx.recv() => {
-                match res {
+            recv_result = audio_rx.recv(), if !closing => {
+                match recv_result {
                     Some(audio_data) => {
                         audio_buffer.extend_from_slice(&audio_data);
 
@@ -222,58 +214,29 @@ async fn run_asr_session(
                             let frame: Vec<u8> = audio_buffer.drain(..AUDIO_FRAME_SIZE).collect();
                             if let Err(e) = ws_stream.send(Message::Binary(frame)).await {
                                 eprintln!("Failed to send audio to ASR: {}", e);
-                                break;
+                                return;
                             }
                         }
                     }
                     None => {
-                        // Channel closed, process stop
-                        println!("Audio channel closed in ASR task. Finalizing...");
-                        
-                        // Signal ASR to flush and finish
-                        let _ = ws_stream.send(Message::Text(serde_json::json!({ "type": "stop" }).to_string())).await;
-                        
+                        // Channel closed or recording stopped
+                        closing = true;
                         // Send any remaining buffered audio
                         if !audio_buffer.is_empty() {
-                            println!("Sending remaining buffer ({} bytes) to ASR...", audio_buffer.len());
                             let _ = ws_stream.send(Message::Binary(audio_buffer.clone())).await;
+                            audio_buffer.clear();
                         }
-                        
-                        // Wait a bit for the final transcript
-                        println!("Waiting up to 1000ms for final ASR result...");
-                        tokio::select! {
-                            msg = ws_stream.next() => {
-                                if let Some(Ok(Message::Text(text))) = msg {
-                                    println!("ASR received final text during stop: {}", text);
-                                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&text) {
-                                        if let Some(final_text) = result.get("final").and_then(|v| v.as_str()) {
-                                            let transcript = AsrTranscript {
-                                                partial: "".to_string(),
-                                                final_text: Some(final_text.to_string()),
-                                                confidence: 0.95,
-                                            };
-                                            let _ = app.emit("voice_assistant:user_transcript", &transcript);
-                                        }
-                                    }
-                                }
-                            }
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(1000)) => {
-                                println!("Timeout waiting for final ASR result");
-                            }
-                        }
-
                         // Close the WebSocket gracefully
                         let _ = ws_stream.close(None).await;
-                        break;
+                        // Continue loop to receive final messages
                     }
                 }
             }
 
             // Receive results from ASR
-            res = ws_stream.next() => {
-                match res {
+            msg_result = ws_stream.next() => {
+                match msg_result {
                     Some(Ok(Message::Text(text))) => {
-                        println!("ASR received text: {}", text);
                         // Parse ASR result
                         if let Ok(result) = serde_json::from_str::<serde_json::Value>(&text) {
                             let partial = result.get("partial")
@@ -281,12 +244,21 @@ async fn run_asr_session(
                                 .unwrap_or("")
                                 .to_string();
 
-                            let final_text = result.get("final")
+                            if !partial.is_empty() {
+                                last_partial = partial.clone();
+                            }
+
+                            let mut final_text = result.get("final")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string());
                             
-                            if let Some(ref f) = final_text {
-                                println!("ASR FINAL identified: {}", f);
+                            // Fix: If final text is too short compared to last partial, use partial
+                            if let Some(ref f_text) = final_text {
+                                if !last_partial.is_empty() && f_text.len() < last_partial.len() / 2 {
+                                    eprintln!("ASR Fix: Replacing short final '{}' with partial '{}'", f_text, last_partial);
+                                    final_text = Some(last_partial.clone());
+                                }
+                                last_partial.clear();
                             }
 
                             let confidence = result.get("confidence")
@@ -295,33 +267,37 @@ async fn run_asr_session(
 
                             let transcript = AsrTranscript {
                                 partial,
-                                final_text: final_text.clone(),
+                                final_text,
                                 confidence,
                             };
 
                             let _ = app.emit("voice_assistant:user_transcript", &transcript);
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
-                        println!("ASR connection closed");
+                    Some(Ok(Message::Close(_))) => {
                         break;
                     }
                     Some(Err(e)) => {
                         eprintln!("ASR WebSocket error: {}", e);
                         break;
                     }
+                    None => {
+                         break;
+                    }
                     _ => {}
                 }
             }
+            
+            // Timeout for waiting for final result after stop
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(1000)), if closing => {
+                eprintln!("ASR stop wait timed out");
+                break;
+            }
         }
     }
-
-    // Signal completion
-    if let Some(tx) = get_done_tx().lock().unwrap().take() {
-        let _ = tx.send(());
-    }
-    println!("ASR session task finished.");
 }
+
+
 
 #[tauri::command]
 pub fn start_recording(app: tauri::AppHandle) -> Result<(), String> {
@@ -354,18 +330,11 @@ pub fn start_recording(app: tauri::AppHandle) -> Result<(), String> {
 
     // Create channel for audio data
     let (audio_tx, audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (done_tx, _done_rx) = oneshot::channel::<()>();
 
     // Store the sender for the capture callback
     {
         let mut tx_guard = get_audio_tx().lock().unwrap();
         *tx_guard = Some(audio_tx);
-    }
-    
-    // Store the done sender
-    {
-        let mut done_guard = get_done_tx().lock().unwrap();
-        *done_guard = Some(done_tx);
     }
 
     let app_handle = app.clone();
@@ -405,8 +374,7 @@ pub fn start_recording(app: tauri::AppHandle) -> Result<(), String> {
                     .collect();
 
                 // Send audio to ASR task
-                let tx_ref = get_audio_tx().lock().unwrap();
-                if let Some(tx) = tx_ref.as_ref() {
+                if let Some(tx) = get_audio_tx().lock().unwrap().as_ref() {
                     let _ = tx.send(pcm_bytes);
                 }
             },
@@ -417,18 +385,12 @@ pub fn start_recording(app: tauri::AppHandle) -> Result<(), String> {
         )
         .map_err(|e| format!("Failed to build stream: {}", e))?;
 
-    // Keep reference to stream to prevent drop
-    Box::leak(Box::new(stream.play().map_err(|e| format!("Failed to play stream: {}", e))?));
-    // Actually stream.play() returns Result<(), PlayStreamError>, so we need to call it and then leak the stream
-    // Correcting:
-    let _ = stream.play();
-    Box::leak(Box::new(stream));
+    stream
+        .play()
+        .map_err(|e| format!("Failed to play stream: {}", e))?;
 
-    app.emit(
-        "voice_assistant:state_changed",
-        serde_json::json!({ "state": "Listening" }),
-    )
-    .map_err(|e| format!("Failed to emit state: {}", e))?;
+    // Leak the stream to keep it alive
+    Box::leak(Box::new(stream));
 
     app.emit(
         "voice_assistant:vad_status",
@@ -438,32 +400,24 @@ pub fn start_recording(app: tauri::AppHandle) -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to emit event: {}", e))?;
 
+    app.emit(
+        "voice_assistant:state_changed",
+        serde_json::json!({ "state": "Listening" }),
+    )
+    .map_err(|e| format!("Failed to emit state: {}", e))?;
+
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_recording(app: tauri::AppHandle) -> Result<(), String> {
-    println!("stop_recording command received.");
+pub fn stop_recording(app: tauri::AppHandle) -> Result<(), String> {
     RECORDING.store(false, Ordering::SeqCst);
-    println!("Recording marked as stopped in atomic flag.");
 
     // Close the audio channel to signal ASR task to finish
     {
         let mut tx_guard = get_audio_tx().lock().unwrap();
         *tx_guard = None;
     }
-    println!("Audio channel closed. Waiting for ASR task to finalize...");
-
-    app.emit(
-        "voice_assistant:state_changed",
-        serde_json::json!({ "state": "FinalizingASR" }),
-    )
-    .map_err(|e| format!("Failed to emit state: {}", e))?;
-    println!("Emitted FinalizingASR state.");
-
-    // Simple sleep to allow ASR task to process final results
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-    println!("Stop recording wait finished.");
 
     app.emit(
         "voice_assistant:vad_status",
@@ -472,6 +426,8 @@ pub async fn stop_recording(app: tauri::AppHandle) -> Result<(), String> {
         },
     )
     .map_err(|e| format!("Failed to emit event: {}", e))?;
+
+
 
     Ok(())
 }

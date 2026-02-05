@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
 
-const SOURCE_SAMPLE_RATE: u32 = 16000; // TTS output is 16kHz mono
+const SOURCE_SAMPLE_RATE: u32 = 24000; // TTS output is 24kHz mono
 const JITTER_BUFFER_FRAMES: usize = 5;
 const DRAIN_TIMEOUT_CALLBACKS: u32 = 50; // Wait ~50 callbacks (~1 sec) before stopping
 
@@ -226,6 +226,7 @@ fn start_playback_internal() -> Result<(), String> {
         "Audio playback config: {}Hz, {} channels",
         playback_config.sample_rate, playback_config.channels
     );
+    println!("DEBUG: SOURCE_SAMPLE_RATE = {}", SOURCE_SAMPLE_RATE);
 
     let config = cpal::StreamConfig {
         channels: playback_config.channels,
