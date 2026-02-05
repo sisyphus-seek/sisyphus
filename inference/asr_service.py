@@ -108,7 +108,7 @@ class ASRService:
         pcm_array = np.frombuffer(pcm_data, dtype=np.int16)
         return pcm_array.astype(np.float32) / 32768.0
     
-    async def transcribe(self, audio_array: np.ndarray) -> dict:
+    async def transcribe(self, audio_array: np.ndarray, is_final: bool = False) -> dict:
         if self.model is None or self.processor is None:
             return {
                 "partial": "",
@@ -118,6 +118,11 @@ class ASRService:
         
         try:
             import torch
+
+            # For very short audio, pad it to at least 0.1s to avoid processor errors
+            if len(audio_array) < self.sample_rate * 0.1:
+                padding = np.zeros(int(self.sample_rate * 0.1) - len(audio_array))
+                audio_array = np.concatenate([audio_array, padding])
 
             inputs = self.processor.apply_transcription_request(audio_array)
             inputs = inputs.to(self.model.device, dtype=self.model.dtype)
@@ -147,15 +152,15 @@ class ASRService:
             transcription = decoded[0]
             
             return {
-                "partial": "",
-                "final": transcription,
+                "partial": "" if is_final else transcription,
+                "final": transcription if is_final else None,
                 "confidence": 0.95
             }
         except Exception as e:
             print(f"Transcription error: {e}")
             return {
                 "partial": "",
-                "final": "[Transcription error]",
+                "final": "[Transcription error]" if is_final else None,
                 "confidence": 0.0
             }
     
@@ -173,30 +178,57 @@ class ASRService:
             else:
                 self.accumulated_audio = []
             
-            result = await self.transcribe(audio_window)
+            result = await self.transcribe(audio_window, is_final=False)
             result["type"] = "asr_result"
             return result
         
         return None
+
+    async def flush(self) -> Optional[dict]:
+        if not self.accumulated_audio:
+            return None
+        
+        print(f"Flushing remaining {len(self.accumulated_audio)} samples")
+        audio_window = np.array(self.accumulated_audio)
+        self.accumulated_audio = []
+        
+        result = await self.transcribe(audio_window, is_final=True)
+        result["type"] = "asr_result"
+        return result
     
     async def handle_connection(self, websocket):
         print(f"New ASR connection from {websocket.remote_address}")
+        self.accumulated_audio = []
         
         try:
             async for message in websocket:
                 if isinstance(message, bytes):
+                    # print(f"Received {len(message)} bytes of audio")
                     result = await self.process_audio_frame(message)
                     if result:
+                        print(f"Sending partial/window result: {result.get('partial', '')}")
                         await websocket.send(json.dumps(result))
                 elif isinstance(message, str):
+                    print(f"Received control message: {message}")
                     control = json.loads(message)
                     if control.get("type") == "reset":
                         self.accumulated_audio = []
                         print("Audio buffer reset")
+                    elif control.get("type") == "stop":
+                        print("Stop command received, flushing buffer...")
+                        result = await self.flush()
+                        if result:
+                            print(f"Sending final flush result: {result.get('final', '')}")
+                            await websocket.send(json.dumps(result))
+                        else:
+                            print("Flush returned no result (empty buffer)")
+                        print("Audio buffer flushed due to stop command")
         except websockets.exceptions.ConnectionClosed:
             print(f"ASR connection closed: {websocket.remote_address}")
         except Exception as e:
             print(f"ASR connection error: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def start(self):
         print(f"Starting ASR WebSocket server on {self.host}:{self.port}")

@@ -117,10 +117,17 @@ export function VoiceAssistant() {
         'voice_assistant:user_transcript',
         (event) => {
           const { partial, final } = event.payload;
-          // Only update transcript display, don't add message here
-          // Message will be added when user stops recording
+          console.log('Transcript event received:', { partial, final, currentStatus: useConversation.getState().status });
+          
           if (final) {
             setTranscript(final);
+            // If we are in FinalizingASR, it means the user has already clicked stop
+            // and is waiting for this final result to trigger the LLM.
+            const currentStatus = useConversation.getState().status;
+            if (currentStatus === 'FinalizingASR') {
+              console.log('Final transcript received in FinalizingASR state, triggering LLM now...');
+              triggerLlmRequest(final);
+            }
           } else if (partial) {
             setTranscript(partial);
           }
@@ -175,6 +182,24 @@ export function VoiceAssistant() {
     }
   }, [reset]);
 
+  const triggerLlmRequest = useCallback(async (text: string) => {
+    if (!text.trim()) {
+      setStatus('Idle');
+      return;
+    }
+
+    try {
+      addMessage({ role: 'user', content: text.trim() });
+      setTranscript('');
+      console.log('Sending to LLM:', text);
+      setStatus('Thinking');
+      await invoke('stream_llm_response', { userMessage: text.trim() });
+    } catch (error) {
+      console.error('LLM error:', error);
+      setStatus('Idle');
+    }
+  }, [setStatus, addMessage, setTranscript]);
+
   const handleStopRecording = useCallback(async () => {
     // Only process if we're in an active recording/finalizing state
     const currentStatus = useConversation.getState().status;
@@ -185,35 +210,25 @@ export function VoiceAssistant() {
 
     try {
       setStatus('FinalizingASR');
+      console.log('Stopping recording, waiting for backend to finalize...');
       await invoke('stop_recording');
+      
+      // We don't trigger LLM here anymore if it's already triggered by the 'final' transcript event.
+      // But if no 'final' transcript comes within a timeout, we should fall back to the current partial.
+      setTimeout(() => {
+          const statusAfterWait = useConversation.getState().status;
+          if (statusAfterWait === 'FinalizingASR') {
+              console.log('FinalizingASR timed out, using current transcript as fallback');
+              const currentTranscript = useConversation.getState().transcript;
+              triggerLlmRequest(currentTranscript);
+          }
+      }, 1500);
 
-      // Get the current transcript and send to LLM
-      const currentTranscript = useConversation.getState().transcript;
-      if (currentTranscript.trim()) {
-        // Add user message
-        addMessage({ role: 'user', content: currentTranscript.trim() });
-
-        // Clear transcript immediately to prevent duplicate submissions
-        setTranscript('');
-
-        console.log('Sending to LLM:', currentTranscript);
-        setStatus('Thinking');
-
-        // Call LLM with the transcript
-        try {
-          await invoke('stream_llm_response', { userMessage: currentTranscript.trim() });
-        } catch (llmError) {
-          console.error('LLM error:', llmError);
-          setStatus('Idle');
-        }
-      } else {
-        setStatus('Idle');
-      }
     } catch (error) {
       console.error('Failed to stop recording:', error);
       setStatus('Idle');
     }
-  }, [setStatus, addMessage, setTranscript]);
+  }, [setStatus, triggerLlmRequest]);
 
   const handleSubmitTranscript = useCallback(() => {
     if (transcript.trim()) {
