@@ -2,6 +2,10 @@ asr:
   model_path: "F:\\GitRepository\\GLM-ASR-Nano-2512"
   device: auto
   fp16: true
+  sample_rate: 16000
+  window_duration: 2.5
+  overlap_duration: 0.5
+  frame_size: 640
 
 tts:
   base_model_path: "F:\\GitRepository\\Qwen3-TTS-12Hz-1.7B-Base"
@@ -9,3 +13,7 @@ tts:
   device: auto
   fp16: true
   default_voice: custom_voice
+  target_sample_rate: 16000
+  frame_ms: 20
+  subchunk_chars: 80
+  subchunk_delimiters: "。！？.!?;；"

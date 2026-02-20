@@ -24,6 +24,8 @@ class TTSService:
         self.sample_rate = 24000  # TTS model native sample rate
         self.target_sample_rate = 16000  # Target for Rust playback
         self.frame_size = 640  # 640 bytes = 320 samples @ 16kHz = 20ms
+        self.subchunk_chars = 80
+        self.subchunk_delimiters = "。！？.!?;；"
 
     def load_config(self) -> None:
         config_path = os.path.join(os.path.dirname(__file__), "models.yaml")
@@ -38,6 +40,15 @@ class TTSService:
         self.default_voice = tts_config.get("default_voice", self.default_voice)
         self.default_language = tts_config.get("default_language", self.default_language)
         self.default_speaker = tts_config.get("default_speaker", self.default_speaker)
+        self.subchunk_chars = int(tts_config.get("subchunk_chars", self.subchunk_chars))
+        self.subchunk_delimiters = tts_config.get(
+            "subchunk_delimiters", self.subchunk_delimiters
+        )
+        self.target_sample_rate = int(
+            tts_config.get("target_sample_rate", self.target_sample_rate)
+        )
+        frame_ms = float(tts_config.get("frame_ms", 20))
+        self.frame_size = int(self.target_sample_rate * frame_ms / 1000) * 2
         self.attn_implementation = tts_config.get(
             "attn_implementation", self.attn_implementation
         )
@@ -98,6 +109,38 @@ class TTSService:
     def float32_to_pcm16(self, audio_array: np.ndarray) -> bytes:
         audio_int16 = np.clip(audio_array * 32767, -32768, 32767).astype(np.int16)
         return audio_int16.tobytes()
+
+    def split_text(self, text: str) -> list[str]:
+        if not text:
+            return []
+
+        # First pass: split by delimiters while keeping them
+        segments: list[str] = []
+        current = []
+        for ch in text:
+            current.append(ch)
+            if ch in self.subchunk_delimiters:
+                segment = "".join(current).strip()
+                if segment:
+                    segments.append(segment)
+                current = []
+
+        tail = "".join(current).strip()
+        if tail:
+            segments.append(tail)
+
+        # Second pass: enforce max length
+        final_segments: list[str] = []
+        for seg in segments:
+            if len(seg) <= self.subchunk_chars:
+                final_segments.append(seg)
+            else:
+                for i in range(0, len(seg), self.subchunk_chars):
+                    piece = seg[i : i + self.subchunk_chars].strip()
+                    if piece:
+                        final_segments.append(piece)
+
+        return final_segments
     
     async def synthesize(
         self,
@@ -223,25 +266,33 @@ class TTSService:
                             ref_text = control.get("ref_text")
                             voice_mode = control.get("voice_mode")
                             
-                            print(f"Synthesizing text: {text}")
-                            frames = await self.process_text_chunk(
-                                text,
-                                text_id,
-                                voice,
-                                language,
-                                speaker,
-                                instruct,
-                                ref_audio,
-                                ref_text,
-                                voice_mode,
-                            )
-                            
-                            if frames:
-                                print(f"Sending {len(frames)} audio frames for text_id={text_id}")
-                                for i, frame in enumerate(frames):
-                                    await websocket.send(frame)
-                            else:
-                                print(f"No frames generated for text_id={text_id}")
+                            pieces = self.split_text(text)
+                            if not pieces:
+                                continue
+
+                            for idx, piece in enumerate(pieces):
+                                piece_id = text_id * 1000 + idx
+                                print(f"Synthesizing text piece: {piece}")
+                                frames = await self.process_text_chunk(
+                                    piece,
+                                    piece_id,
+                                    voice,
+                                    language,
+                                    speaker,
+                                    instruct,
+                                    ref_audio,
+                                    ref_text,
+                                    voice_mode,
+                                )
+
+                                if frames:
+                                    print(
+                                        f"Sending {len(frames)} audio frames for text_id={piece_id}"
+                                    )
+                                    for i, frame in enumerate(frames):
+                                        await websocket.send(frame)
+                                else:
+                                    print(f"No frames generated for text_id={piece_id}")
                         elif message_type == "end":
                             await websocket.send(json.dumps({"type": "complete"}))
                             break

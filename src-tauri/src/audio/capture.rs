@@ -2,15 +2,34 @@ use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleRate, SupportedStreamConfigRange};
 use futures_util::{SinkExt, StreamExt};
+use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const TARGET_SAMPLE_RATE: u32 = 16000;
 const ASR_HOST: &str = "ws://127.0.0.1:8765";
-const AUDIO_FRAME_SIZE: usize = 640; // 20ms at 16kHz mono = 320 samples * 2 bytes
+
+fn get_target_sample_rate() -> u32 {
+    env::var("AUDIO_SAMPLE_RATE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(16000)
+}
+
+fn get_audio_frame_ms() -> u32 {
+    env::var("AUDIO_FRAME_MS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(20)
+}
+
+fn get_audio_frame_size(sample_rate: u32) -> usize {
+    let frame_ms = get_audio_frame_ms() as f32;
+    let samples = (sample_rate as f32 * frame_ms / 1000.0).round() as usize;
+    samples * 2
+}
 
 #[derive(Clone, serde::Serialize)]
 pub struct VadEvent {
@@ -69,7 +88,7 @@ impl AudioCapture {
 
         // Try to find a config that supports our target sample rate
         // Prefer mono, but accept stereo if needed
-        let target_rate = SampleRate(TARGET_SAMPLE_RATE);
+        let target_rate = SampleRate(get_target_sample_rate());
 
         // First, try to find exact match with mono
         for config in &supported_configs {
@@ -131,8 +150,8 @@ impl AudioCapture {
     }
 }
 
-/// Simple linear resampling from source rate to target rate (16kHz)
-fn resample_to_16k(samples: &[f32], source_rate: u32, channels: u16) -> Vec<f32> {
+/// Simple linear resampling from source rate to target rate
+fn resample_to_target(samples: &[f32], source_rate: u32, channels: u16, target_rate: u32) -> Vec<f32> {
     // First, convert stereo to mono if needed
     let mono_samples: Vec<f32> = if channels == 2 {
         samples
@@ -150,12 +169,12 @@ fn resample_to_16k(samples: &[f32], source_rate: u32, channels: u16) -> Vec<f32>
     };
 
     // If already at target rate, return as-is
-    if source_rate == TARGET_SAMPLE_RATE {
+    if source_rate == target_rate {
         return mono_samples;
     }
 
     // Linear interpolation resampling
-    let ratio = source_rate as f64 / TARGET_SAMPLE_RATE as f64;
+    let ratio = source_rate as f64 / target_rate as f64;
     let output_len = (mono_samples.len() as f64 / ratio).ceil() as usize;
     let mut output = Vec::with_capacity(output_len);
 
@@ -197,7 +216,9 @@ async fn run_asr_session(
         }
     };
 
-    let mut audio_buffer = Vec::with_capacity(AUDIO_FRAME_SIZE);
+    let target_rate = get_target_sample_rate();
+    let audio_frame_size = get_audio_frame_size(target_rate);
+    let mut audio_buffer = Vec::with_capacity(audio_frame_size);
 
     loop {
         tokio::select! {
@@ -206,8 +227,8 @@ async fn run_asr_session(
                 audio_buffer.extend_from_slice(&audio_data);
 
                 // Send complete frames to ASR
-                while audio_buffer.len() >= AUDIO_FRAME_SIZE {
-                    let frame: Vec<u8> = audio_buffer.drain(..AUDIO_FRAME_SIZE).collect();
+                while audio_buffer.len() >= audio_frame_size {
+                    let frame: Vec<u8> = audio_buffer.drain(..audio_frame_size).collect();
                     if let Err(e) = ws_stream.send(Message::Binary(frame)).await {
                         eprintln!("Failed to send audio to ASR: {}", e);
                         return;
@@ -290,8 +311,11 @@ pub fn start_recording(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("Config error: {}", e))?;
 
     println!(
-        "Audio capture config: {}Hz, {} channels",
-        capture_config.sample_rate, capture_config.channels
+        "Audio capture config: {}Hz, {} channels (target {}Hz, frame {}ms)",
+        capture_config.sample_rate,
+        capture_config.channels,
+        get_target_sample_rate(),
+        get_audio_frame_ms()
     );
 
     let config = cpal::StreamConfig {
@@ -336,7 +360,12 @@ pub fn start_recording(app: tauri::AppHandle) -> Result<(), String> {
                 );
 
                 // Resample to 16kHz mono if needed
-                let resampled = resample_to_16k(data, source_rate, source_channels);
+                let resampled = resample_to_target(
+                    data,
+                    source_rate,
+                    source_channels,
+                    get_target_sample_rate(),
+                );
 
                 // Convert f32 samples to i16 PCM bytes and send to ASR
                 let pcm_bytes: Vec<u8> = resampled

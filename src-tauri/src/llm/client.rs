@@ -15,8 +15,21 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use crate::audio::playback::queue_playback_audio;
 use crate::conversation::{ConversationState, Message, Role};
 
-const MIN_CHUNK_TOKENS: usize = 20;
 const TTS_HOST: &str = "ws://127.0.0.1:8766";
+
+fn get_min_chunk_tokens() -> usize {
+    env::var("LLM_TTS_MIN_CHUNK_TOKENS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(20)
+}
+
+fn get_max_chunk_ms() -> u64 {
+    env::var("LLM_TTS_MAX_CHUNK_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300)
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmChunk {
@@ -102,7 +115,7 @@ impl LlmClient {
 
                             let elapsed_ms = last_emit_time.elapsed().as_millis() as u64;
 
-                            let should_emit = token_count >= MIN_CHUNK_TOKENS
+                            let should_emit = token_count >= get_min_chunk_tokens()
                                 || (token_count >= 10 && has_punctuation)
                                 || elapsed_ms >= 200;
 
@@ -319,9 +332,9 @@ pub async fn stream_llm_response(
                         let elapsed_ms = last_emit_time.elapsed().as_millis() as u64;
 
                         // Emit chunk when: enough tokens, or punctuation, or time elapsed
-                        let should_emit = token_count >= MIN_CHUNK_TOKENS
+                        let should_emit = token_count >= get_min_chunk_tokens()
                             || (token_count >= 5 && has_punctuation)
-                            || elapsed_ms >= 300;
+                            || elapsed_ms >= get_max_chunk_ms();
 
                         if should_emit && !current_chunk.is_empty() {
                             let chunk = LlmChunk {

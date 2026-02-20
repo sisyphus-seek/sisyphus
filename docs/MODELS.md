@@ -12,6 +12,10 @@ asr:
   device: auto
   fp16: true
   kv_cache: true
+  sample_rate: 16000
+  window_duration: 2.5
+  overlap_duration: 0.5
+  frame_size: 640
 
 tts:
   base_model_path: "F:\\GitRepository\\Qwen3-TTS-12Hz-1.7B-Base"
@@ -22,6 +26,10 @@ tts:
   default_language: Auto
   default_speaker: Vivian
   attn_implementation: null
+  target_sample_rate: 16000
+  frame_ms: 20
+  subchunk_chars: 80
+  subchunk_delimiters: "。！？.!?;；"
 ```
 
 ## Voice references

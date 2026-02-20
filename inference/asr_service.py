@@ -33,9 +33,16 @@ class ASRService:
 
         asr_config = config.get("asr", {})
         self.model_path = asr_config.get("model_path", self.model_path)
+        self.sample_rate = int(asr_config.get("sample_rate", self.sample_rate))
+        self.window_duration = float(asr_config.get("window_duration", self.window_duration))
+        self.overlap_duration = float(asr_config.get("overlap_duration", self.overlap_duration))
+        self.frame_size = int(asr_config.get("frame_size", self.frame_size))
         requested_device = asr_config.get("device", "auto")
         self.use_fp16 = bool(asr_config.get("fp16", True))
         self.use_kv_cache = bool(asr_config.get("kv_cache", True))
+
+        # Recalculate overlap samples based on updated sample rate
+        self.overlap_samples = int(self.sample_rate * self.overlap_duration)
 
         import torch
 

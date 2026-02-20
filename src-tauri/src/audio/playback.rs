@@ -2,11 +2,17 @@ use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleRate, SupportedStreamConfigRange};
 use std::collections::VecDeque;
+use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
 
-const SOURCE_SAMPLE_RATE: u32 = 16000; // TTS output is 16kHz mono
+fn get_source_sample_rate() -> u32 {
+    env::var("AUDIO_SAMPLE_RATE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(16000)
+}
 const JITTER_BUFFER_FRAMES: usize = 5;
 const DRAIN_TIMEOUT_CALLBACKS: u32 = 50; // Wait ~50 callbacks (~1 sec) before stopping
 
@@ -119,13 +125,18 @@ impl AudioPlayback {
 }
 
 /// Resample from 16kHz mono to target rate and channels
-fn resample_for_playback(input: &[i16], target_rate: u32, target_channels: u16) -> Vec<f32> {
+fn resample_for_playback(
+    input: &[i16],
+    source_rate: u32,
+    target_rate: u32,
+    target_channels: u16,
+) -> Vec<f32> {
     // First, convert to f32
     let mono_f32: Vec<f32> = input.iter().map(|&s| s as f32 / 32768.0).collect();
 
     // Resample if needed
-    let resampled = if target_rate != SOURCE_SAMPLE_RATE {
-        let ratio = target_rate as f64 / SOURCE_SAMPLE_RATE as f64;
+    let resampled = if target_rate != source_rate {
+        let ratio = target_rate as f64 / source_rate as f64;
         let output_len = (mono_f32.len() as f64 * ratio).ceil() as usize;
         let mut output = Vec::with_capacity(output_len);
 
@@ -223,8 +234,10 @@ fn start_playback_internal() -> Result<(), String> {
         .map_err(|e| format!("Config error: {}", e))?;
 
     println!(
-        "Audio playback config: {}Hz, {} channels",
-        playback_config.sample_rate, playback_config.channels
+        "Audio playback config: {}Hz, {} channels (source {}Hz)",
+        playback_config.sample_rate,
+        playback_config.channels,
+        get_source_sample_rate()
     );
 
     let config = cpal::StreamConfig {
@@ -233,6 +246,7 @@ fn start_playback_internal() -> Result<(), String> {
         buffer_size: cpal::BufferSize::Default,
     };
 
+    let source_rate = get_source_sample_rate();
     let target_rate = playback_config.sample_rate;
     let target_channels = playback_config.channels;
 
@@ -277,8 +291,12 @@ fn start_playback_internal() -> Result<(), String> {
                         let samples = bytes_to_i16_samples(&audio_bytes);
 
                         // Resample to target format
-                        let resampled_samples =
-                            resample_for_playback(&samples, target_rate, target_channels);
+                        let resampled_samples = resample_for_playback(
+                            &samples,
+                            source_rate,
+                            target_rate,
+                            target_channels,
+                        );
 
                         for sample in resampled_samples {
                             if output_idx < data.len() {
